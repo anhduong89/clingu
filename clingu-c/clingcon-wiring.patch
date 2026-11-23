@@ -1,0 +1,307 @@
+diff --git a/libclingcon/CMakeLists.txt b/libclingcon/CMakeLists.txt
+index 4864cae..bde8407 100644
+--- a/libclingcon/CMakeLists.txt
++++ b/libclingcon/CMakeLists.txt
+@@ -9,6 +9,7 @@ set(header-group-clingcon
+     "${CMAKE_CURRENT_SOURCE_DIR}/clingcon/parsing.hh"
+     "${CMAKE_CURRENT_SOURCE_DIR}/clingcon/propagator.hh"
+     "${CMAKE_CURRENT_SOURCE_DIR}/clingcon/solver.hh"
++    "${CMAKE_CURRENT_SOURCE_DIR}/clingcon/cumulative.hh"
+     "${CMAKE_CURRENT_SOURCE_DIR}/clingcon/util.hh")
+ source_group("${ide_header_group}\\clingcon" FILES ${header-group-clingcon})
+ set(header
+@@ -22,7 +23,8 @@ set(source-group
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/constraints.cc"
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/parsing.cc"
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/propagator.cc"
+-    "${CMAKE_CURRENT_SOURCE_DIR}/src/solver.cc")
++    "${CMAKE_CURRENT_SOURCE_DIR}/src/solver.cc"
++    "${CMAKE_CURRENT_SOURCE_DIR}/src/cumulative.cc")
+ source_group("${ide_source_group}" FILES ${source-group})
+ set(source
+     ${source-group})
+diff --git a/libclingcon/clingcon/base.hh b/libclingcon/clingcon/base.hh
+index cc4fc8a..565a278 100644
+--- a/libclingcon/clingcon/base.hh
++++ b/libclingcon/clingcon/base.hh
+@@ -81,6 +81,14 @@ constexpr bool DEFAULT_CHECK_SOLUTION{true};
+ constexpr bool DEFAULT_CHECK_STATE{false};
+ constexpr bool DEFAULT_ADD_ORDER_CLAUSES{false};
+ 
++//! clingu: the form of the clauses the &cumu propagator emits. Each clause
++//! requires every task in it to start in some range: covering one instant
++//! (pointwise), covering a whole step of the profile (big-step), or keeping its
++//! current bounds (naive); mixed is pointwise for overloads and big-step for
++//! bound pushes. See cumulative.cc.
++enum class CumuExplanation : uint32_t { Pointwise = 0, BigStep = 1, Naive = 2, Mixed = 3 };
++constexpr CumuExplanation DEFAULT_CUMU_EXPLANATION{CumuExplanation::Pointwise};
++
+ constexpr lit_t TRUE_LIT{1}; //!< The true literal.
+ constexpr var_t INVALID_VAR{std::numeric_limits<var_t>::max()};
+ 
+@@ -111,6 +119,9 @@ struct SolverStatistics {
+         refined_reason += stats.refined_reason;
+         introduced_reason += stats.introduced_reason;
+         literals += stats.literals;
++        cumu_conflict_clauses += stats.cumu_conflict_clauses;
++        cumu_push_clauses += stats.cumu_push_clauses;
++        cumu_presence_clauses += stats.cumu_presence_clauses;
+     }
+ 
+     double time_propagate{0};
+@@ -119,6 +130,11 @@ struct SolverStatistics {
+     uint64_t refined_reason{0};
+     uint64_t introduced_reason{0};
+     uint64_t literals{0};
++    //! clingu (&cumu propagator) counters, per thread: clauses emitted by the
++    //! overload rule (F1), by the bound pushes (F2/F3) and by presence (F4).
++    uint64_t cumu_conflict_clauses{0};
++    uint64_t cumu_push_clauses{0};
++    uint64_t cumu_presence_clauses{0};
+ };
+ 
+ //! Propagator specific statistics.
+@@ -239,6 +255,7 @@ struct Config {
+     bool add_order_clauses{DEFAULT_ADD_ORDER_CLAUSES};
+     bool check_solution{DEFAULT_CHECK_SOLUTION};
+     bool check_state{DEFAULT_CHECK_STATE};
++    CumuExplanation cumu_explanation{DEFAULT_CUMU_EXPLANATION}; //!< clingu: --cumu-explanation
+ };
+ 
+ //! Class to add solver literals, create clauses, and access the current
+diff --git a/libclingcon/clingcon/parsing.hh b/libclingcon/clingcon/parsing.hh
+index df99a3f..2061b34 100644
+--- a/libclingcon/clingcon/parsing.hh
++++ b/libclingcon/clingcon/parsing.hh
+@@ -27,6 +27,7 @@
+ 
+ #include "clingcon/base.hh"
+ #include "clingcon/util.hh"
++#include "clingcon/cumulative.hh"
+ 
+ //! @file clingcon/parsing.hh
+ //! This module contains functions for parsing and normalizing constraints.
+@@ -79,6 +80,8 @@ constexpr char const *THEORY = R"(
+     &show/0 : sum_term, directive;
+     &distinct/0 : sum_term, head;
+     &disjoint/0 : disjoint_term, head;
++    &__cumu_h/0 : sum_term, {<=}, sum_term, any;
++    &__cumu_b/0 : sum_term, {<=}, sum_term, any;
+     &dom/0 : dom_term, {=}, var_term, head
+ }.
+ )";
+@@ -123,6 +126,9 @@ class AbstractConstraintBuilder {
+     [[nodiscard]] virtual auto add_disjoint(lit_t lit, CoVarVec const &elems) -> bool = 0;
+     //! Add a domain for the given variable.
+     [[nodiscard]] virtual auto add_dom(lit_t lit, var_t var, IntervalSet<val_t> const &elems) -> bool = 0;
++    //! Add a cumulative constraint.
++    [[nodiscard]] virtual auto add_cumulative(lit_t lit, CumulativeElementVec const &elems, val_t capacity)
++        -> bool = 0;
+ };
+ 
+ //! Combine coefficients of terms with the same variable and optionally drop
+diff --git a/libclingcon/src/clingcon.cc b/libclingcon/src/clingcon.cc
+index f7e15b3..4ed35f7 100644
+--- a/libclingcon/src/clingcon.cc
++++ b/libclingcon/src/clingcon.cc
+@@ -281,6 +281,30 @@ void set_value(Target target, Config &config, std::pair<val_t, std::optional<uin
+     throw std::invalid_argument("invalid argument");
+ }
+ 
++//! clingu: parse the value of --cumu-explanation.
++[[nodiscard]] auto parse_cumu_explanation(char const *value) -> CumuExplanation {
++    if (std::strcmp(value, "pointwise") == 0) {
++        return CumuExplanation::Pointwise;
++    }
++    if (std::strcmp(value, "bigstep") == 0) {
++        return CumuExplanation::BigStep;
++    }
++    if (std::strcmp(value, "naive") == 0) {
++        return CumuExplanation::Naive;
++    }
++    if (std::strcmp(value, "mixed") == 0) {
++        return CumuExplanation::Mixed;
++    }
++    throw std::invalid_argument("invalid argument");
++}
++
++[[nodiscard]] auto parser_cumu_explanation(CumuExplanation &dest) -> std::function<bool(const char *)> {
++    return [&dest](char const *value) {
++        dest = parse_cumu_explanation(value);
++        return true;
++    };
++}
++
+ [[nodiscard]] auto parser_bool_thread(clingcon_theory &theory, Target target) -> std::function<bool(const char *)> {
+     return [&theory, target](char const *value) {
+         auto [val, thread] = parse_bool_thread(value);
+@@ -421,6 +445,8 @@ extern "C" auto clingcon_configure(clingcon_theory_t *theory, char const *key, c
+             config.check_solution = parse_bool(value);
+         } else if (std::strcmp(key, "check-state") == 0) {
+             config.check_state = parse_bool(value);
++        } else if (std::strcmp(key, "cumu-explanation") == 0) {
++            config.cumu_explanation = parse_cumu_explanation(value);
+         }
+         // propagation
+         else if (std::strcmp(key, "order-heuristic") == 0) {
+@@ -541,6 +567,15 @@ extern "C" auto clingcon_register_options(clingcon_theory_t *theory, clingo_opti
+                      .c_str(),
+                  parser_bool_thread(*theory, Target::SplitAll), true);
+ 
++        // clingu
++        opts.add(group, "cumu-explanation",
++                 "Form of the clauses emitted for &cumu [pointwise]\n"
++                 "      <arg>: {pointwise|bigstep|naive|mixed}\n"
++                 "        pointwise: each task covers one instant\n"
++                 "        bigstep  : each task covers a whole step of the profile\n"
++                 "        naive    : each task keeps its current bounds\n"
++                 "        mixed    : pointwise for overloads, bigstep for bound pushes",
++                 parser_cumu_explanation(config.cumu_explanation), false, "<arg>");
+         // hidden/debug
+         opts.add(group, "min-int,@2", format("Set minimum integer [", config.min_int, "]").c_str(),
+                  parser_num<val_t>(config.min_int, MIN_VAL, MAX_VAL), false, "<i>");
+@@ -610,7 +645,9 @@ extern "C" auto clingcon_assignment_next(clingcon_theory_t *theory, uint32_t thr
+     auto const &map = theory->propagator.var_map();
+     auto it = map.lower_bound(*index);
+     if (it != map.end()) {
+-        *index = *index + 1;
++        // clingu: step to the next variable that has a name. The activity
++        // variables of &cumu have none, so the indices in the map can have gaps.
++        *index = static_cast<size_t>(it->first) + 1;
+         return true;
+     }
+     return false;
+diff --git a/libclingcon/src/parsing.cc b/libclingcon/src/parsing.cc
+index 13b3c2a..2416a73 100644
+--- a/libclingcon/src/parsing.cc
++++ b/libclingcon/src/parsing.cc
+@@ -220,6 +220,14 @@ struct TheoryRewriter {
+         }
+         if (ast.type() == Type::TheoryAtom) {
+             auto term = ast.get<Node>(Attribute::Term);
++            if (match(term, "cumu")) {
++                // cumulative elements are (startvar, duration, demand) tuples; the
++                // start variable already makes elements distinct, so skip
++                // rewrite_tuple (single-term only) and only tag for safety/occurrence.
++                auto atom = ast.copy();
++                atom.set(Attribute::Term, tag_terms(term, in_literal ? "_b" : "_h"));
++                return atom;
++            }
+             if (match(term, "sum", "nsum", "diff", "distinct", "disjoint", "minimize", "maximize")) {
+                 auto atom = ast.copy();
+ 
+@@ -892,8 +900,62 @@ void transform(Clingo::AST::Node const &ast, NodeCallback const &cb, bool shift)
+     }
+ }
+ 
++[[nodiscard]] auto parse_cumulative(AbstractConstraintBuilder &builder, Clingo::TheoryAtom const &atom) -> bool {
++    check_syntax(atom.has_guard(), "Invalid Syntax: &cumu needs a '<= Capacity' guard");
++    auto guard = atom.guard();
++    auto cap = evaluate(guard.second);
++    check_syntax(cap.type() == Clingo::SymbolType::Number, "Invalid Syntax: &cumu capacity must be an integer");
++    check_syntax(cap.number() >= 0, "Invalid Syntax: &cumu capacity must be non-negative");
++    CumulativeElementVec elems;
++    for (auto const &element : atom.elements()) {
++        auto tuple = element.tuple();
++        check_syntax(tuple.size() == 3, "Invalid Syntax: &cumu element must be StartVar,Duration,Demand");
++        // The start must name an integer variable. A number, a string or a
++        // negated term would otherwise be taken as the name of a new, unrelated
++        // variable, and the element would constrain nothing the program refers to.
++        auto start_sym = evaluate(tuple[0]);
++        check_syntax(start_sym.type() == Clingo::SymbolType::Function && start_sym.is_positive() &&
++                         start_sym.name()[0] != '#',
++                     "Invalid Syntax: &cumu start must be an integer variable");
++        auto start = builder.add_variable(start_sym);
++        auto dur = evaluate(tuple[1]);
++        auto demand = evaluate(tuple[2]);
++        check_syntax(dur.type() == Clingo::SymbolType::Number && demand.type() == Clingo::SymbolType::Number,
++                     "Invalid Syntax: &cumu duration/demand must be integers");
++        // Reject meaningless task geometry rather than accepting it silently.
++        // translate() builds the activity variable over [0, demand], so a
++        // NEGATIVE demand inverts that domain: [a <= 0] collapses to TRUE_LIT,
++        // the `lower_bound(a) > 0` activity test can never hold, and the element
++        // becomes inert -- a typo would discard the constraint with no error and
++        // yield a "feasible" schedule that exceeds the cap. Zero demand stays
++        // legal: a task that consumes nothing is meaningful, and ignoring it is
++        // the correct semantics rather than an accident.
++        check_syntax(dur.number() >= 0, "Invalid Syntax: &cumu duration must be non-negative");
++        check_syntax(demand.number() >= 0, "Invalid Syntax: &cumu demand must be non-negative");
++        // Each element's condition gates whether it is an active task. With a
++        // wildcard like flight(D,E,_,X) the grounder emits one element per matched
++        // ground literal (e.g. one per carried-customer count W), all sharing the
++        // same start var; only the element whose condition holds is a real task.
++        auto cond = builder.solver_literal(element.condition_id());
++        elems.push_back(
++            CumulativeElement{start, check_valid_value(dur.number()), check_valid_value(demand.number()), cond});
++    }
++    return builder.add_cumulative(builder.solver_literal(atom.literal()), elems, check_valid_value(cap.number()));
++}
++
+ auto parse(AbstractConstraintBuilder &builder, Clingo::TheoryAtoms theory_atoms) -> bool {
+     for (auto const &atom : theory_atoms) {
++        // &cumu is supported in rule HEADS only: a body
++        // occurrence would need the complement constraint propagated when the
++        // atom is false, which the propagator does not provide. Reject it.
++        check_syntax(!match(atom.term(), "__cumu_b", 0),
++                     "Invalid Syntax: &cumu may only occur in a rule head (body occurrences are not supported)");
++        if (match(atom.term(), "__cumu_h", 0)) {
++            if (!parse_cumulative(builder, atom)) {
++                return false;
++            }
++            continue;
++        }
+         bool is_sum_b = match(atom.term(), "__sum_b", 0);
+         bool is_sum_h = match(atom.term(), "__sum_h", 0);
+         bool is_diff_b = match(atom.term(), "__diff_b", 0);
+diff --git a/libclingcon/src/propagator.cc b/libclingcon/src/propagator.cc
+index 06036f5..610e206 100644
+--- a/libclingcon/src/propagator.cc
++++ b/libclingcon/src/propagator.cc
+@@ -23,8 +23,11 @@
+ // }}}
+ 
+ #include "clingcon/propagator.hh"
++#include "clingcon/cumulative.hh"
+ #include "clingcon/parsing.hh"
+ 
++#include <stdexcept>
++
+ namespace Clingcon {
+ 
+ namespace {
+@@ -244,6 +247,21 @@ class ConstraintBuilder final : public AbstractConstraintBuilder {
+     [[nodiscard]] auto add_dom(lit_t lit, var_t var, IntervalSet<val_t> const &elems) -> bool override {
+         return cc_.assignment().is_false(lit) || propagator_.add_dom(cc_, lit, var, elems);
+     }
++    [[nodiscard]] auto add_cumulative(lit_t lit, CumulativeElementVec const &elems, val_t capacity) -> bool override {
++        // Load-time check (paper Definition "&cumu-imposing program"): a &cumu atom
++        // is accepted only as a FACT, i.e. its solver literal is already true at
++        // load time (the rule body was empty or simplified away by the grounder).
++        // A &cumu head whose body is not a fact would be enforced whenever the
++        // atom is not false and could silently lose the answer sets in which the
++        // body is false; reject it with an error instead of a precondition.
++        if (!cc_.assignment().is_true(lit)) {
++            throw std::runtime_error("Invalid Program: &cumu may only occur as the head of a fact "
++                                     "(its rule body must be empty after grounding); "
++                                     "a &cumu head with a non-fact body is not supported");
++        }
++        propagator_.add_constraint(CumulativeConstraint::create(lit, elems, capacity));
++        return true;
++    }
+ 
+     //! Prepare the minimize constraint.
+     auto prepare_minimize() -> UniqueMinimizeConstraint {
+@@ -351,6 +369,13 @@ void Propagator::add_statistics_(Clingo::UserStatistics &root, Statistics &stats
+             .set_value(static_cast<double>(solver_stat.introduced_reason));
+         thread.add_subkey("Literals introduced", StatisticsType::Value)
+             .set_value(static_cast<double>(solver_stat.literals));
++        // clingu: clauses emitted by the &cumu propagator (see cumulative.cc)
++        thread.add_subkey("Cumulative conflict clauses", StatisticsType::Value)
++            .set_value(static_cast<double>(solver_stat.cumu_conflict_clauses));
++        thread.add_subkey("Cumulative push clauses", StatisticsType::Value)
++            .set_value(static_cast<double>(solver_stat.cumu_push_clauses));
++        thread.add_subkey("Cumulative presence clauses", StatisticsType::Value)
++            .set_value(static_cast<double>(solver_stat.cumu_presence_clauses));
+     }
+ }
+ 

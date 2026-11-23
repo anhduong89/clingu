@@ -1,0 +1,13 @@
+# Python dependencies for clingu.
+
+# Solver environment. clingcon is not installed from PyPI:
+# clingu-c/build_clingu.sh clones github.com/potassco/clingcon at commit
+# 82fc1406d65d0ab98e70b51796f7c9e520612d6e, applies clingcon-wiring.patch and
+# builds it. Point PYTHONPATH at the result.
+clingo==5.8.0
+
+# Only for regenerating the synthetic energy-cost workbook
+# (instances/gen_synthetic_mer_lmp.py). The solver does not need them.
+numpy
+pandas
+openpyxl

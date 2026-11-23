@@ -1,0 +1,84 @@
+NOTICE
+======
+
+This software is released under the MIT License (see LICENSE).
+
+What is ours
+------------
+
+The `&cumu` cumulative propagator is original work:
+
+  * `clingu-c/src/cumulative.cc`
+  * `clingu-c/clingcon/cumulative.hh`
+
+These files are written against clingcon's public C++ interface -- they declare
+`namespace Clingcon`, include `clingcon/base.hh` and `clingcon/solver.hh`, and
+implement clingcon's constraint contracts, so that the propagator compiles
+inside clingcon's `libclingcon/` tree. Using an API is not derivation: no
+clingcon source is copied into either file, and both are covered solely by this
+repository's MIT licence.
+
+The encodings, runners, aggregators, verification oracle, and benchmark
+instances are likewise original work.
+
+Relationship to clingcon
+------------------------
+
+    https://github.com/potassco/clingcon
+    pinned commit 82fc1406d65d0ab98e70b51796f7c9e520612d6e (clingcon 5.2.1)
+
+clingcon is distributed by the Potassco project under the MIT License. It is
+NOT redistributed in this repository: `clingu-c/build_clingu.sh` clones it from
+upstream at the pinned commit and applies the wiring patch locally, so users of
+this software receive clingcon directly from Potassco under Potassco's own
+license terms.
+
+One file here does carry upstream code:
+
+  * `clingu-c/clingcon-wiring.patch` is a unified diff against clingcon's own
+    sources (`libclingcon/CMakeLists.txt`, `libclingcon/clingcon/parsing.hh`,
+    `libclingcon/src/parsing.cc`, `libclingcon/src/propagator.cc`). Because a
+    unified diff carries surrounding context, it reproduces short excerpts of
+    clingcon source verbatim in each hunk. Those excerpts remain under
+    clingcon's MIT licence and copyright; the additions are ours.
+
+Upstream notice
+---------------
+
+clingcon's own licence, as published at commit 82fc140 (`LICENSE.md` upstream),
+is reproduced verbatim in `clingu-c/LICENSE.clingcon`. It reads, in part:
+
+    The MIT License (MIT)
+    Copyright 2017 Roland Kaminski
+
+That copy covers the context excerpts carried by `clingcon-wiring.patch` and
+documents the terms of the clingcon build this software depends on. It does not
+apply to `cumulative.cc` / `cumulative.hh`, which are ours (see "What is ours"
+above) and carry the New Mexico State University copyright alone.
+
+Because this repository's own licence is also MIT, the two sets of terms
+coincide; the MIT requirement that the copyright notice be retained is
+satisfied by `LICENSE.clingcon`.
+
+Third-party components
+----------------------
+
+  * clingo / clingcon (Potassco, MIT) -- fetched at build time, not vendored.
+  * Benchmark instances in `exp/instances/` are synthetic and are our own
+    work. They ship pre-generated: the generator that produced them depended
+    on a sibling project that is not included here. They contain no
+    proprietary energy-cost data.
+
+Data note
+---------
+
+The real MER/LMP energy-cost workbook used in earlier work by this group is
+proprietary and is deliberately excluded from this repository (see .gitignore).
+Nothing in this repository depends on it.
+
+A synthetic replacement, `instances/MER_LMP_Information_synthetic.xlsx`, is
+included and may be redistributed freely. It was produced by sampling from a
+multivariate normal fitted to the real data's per-time-slot means and
+inter-vertiport covariance; it preserves those aggregate statistics only, and
+no individual real reading appears in it. See `instances/README.md` for the
+cell-by-cell verification and for its coverage limitation.

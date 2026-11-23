@@ -1,0 +1,113 @@
+# clingu -- ignore rules
+
+# --- Proprietary data ----------------------------------------------
+# Real energy-cost values cannot be published. Only the synthetic generator
+# and the synthetic workbook are in the repository.
+**/MER_LMP_Information.xlsx
+
+# --- Build products ------------------------------------------------
+# clingcon is fetched and patched by clingu-c/build_clingu.sh; the compiled
+# module is never committed.
+build/
+_skbuild/
+*.so
+*.o
+*.a
+*.dylib
+clingcon-src/
+clingu-build*/
+
+# --- Logs and solver output ----------------------------------------
+*.log
+*.sched.lp
+*.sol
+*.out
+
+# --- Python --------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+dist/
+sdist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Environments --------------------------------------------------
+.conda/
+venv/
+env/
+ENV/
+.venv/
+
+# --- Editor / OS ---------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# --- LaTeX build files ---------------------------------------------
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.out.ps
+
+# --- Scratch -------------------------------------------------------
+scratch/
+tmp/
+SESSION_ARCHIVE_*.md
+.claude/
+
+# --- Interactive demo ----------------------------------------------
+# The GUI demo has its own repository.
+*clinguin*
+*evtol-gui*
+evtol_backend.py
+launcher.py
+run_demo.sh
+run_server.sh
+clingu_console.html
+clingu_ny_playback.html
+
+# --- Local working material ----------------------------------------
+# Experiment code, results, notes and reference copies that belong to
+# specific studies are kept locally and are not part of this repository.
+/results/
+/source-code/
+/docs/
+/RCPSP-ASPOCP2026-master/
+/Claude outputs/
+/RCPSP_BENCHMARK_TODO.md
+
+# --- clingu-py package ---------------------------------------------
+# Vendored clingcon sources and the copied licence are produced by
+# clingu-py/make_sdist.sh and travel only inside the sdist.
+/clingu-py/vendor/
+/clingu-py/LICENSE.clingcon
+
+# --- Backups and superseded copies ---------------------------------
+*.bak
+*.bak[0-9]*
+*.bak-*
+*.v1
+*.pre-tplp
+/clingu-c/src/cumulative-1.cc
+/clingu-c_debug/
+
+# --- Development tests and notes -----------------------------------
+/clingu-c/tests/
+/clingu-c/examples/smoke_3v_5a.lp
+/clingu-c/examples/bug_condition_watch.lp
+/clingu-c/CHANGE.md
+/clingu-c/BUG_condition_watch.md
+/clingu-c/EXPERIMENT.md
